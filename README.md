@@ -339,12 +339,6 @@ print(cursor.fetchall())
 | 消费者 | 仅skill | skill + 网页前端 |
 | 历史数据 | 无 | 支持查询 |
 
-## 🔗 相关项目
-
-- **佳明健康仪表盘** - http://175.6.27.232:9999
-  - Web界面，可视化展示所有健康数据
-  - 位置：`/home/roots/garmin-dashboard/`
-
 ## 📝 开发说明
 
 ### 添加新字段
