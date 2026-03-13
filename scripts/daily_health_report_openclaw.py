@@ -10,14 +10,108 @@ from pathlib import Path
 ALERT_FILE = Path.home() / ".clawdbot" / "feishu_health_alert.json"
 
 def load_garmin_data():
-    """加载Garmin数据"""
-    cache_file = Path.home() / ".clawdbot" / ".garmin-cache.json"
-    if not cache_file.exists():
+    """加载Garmin数据 - 从数据库读取（更准确）"""
+    import sqlite3
+    from datetime import datetime, timedelta
+
+    db_path = Path.home() / ".clawdbot" / "garmin" / "data.db"
+    if not db_path.exists():
         return None
+
     try:
-        with open(cache_file) as f:
-            return json.load(f)
-    except:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # 获取今天的数据（如果步数很少，用昨天的）
+        beijing_tz = timedelta(hours=8)
+        now = datetime.now()
+
+        # 判断今天还是昨天
+        hour = now.hour
+        if hour < 5:
+            # 凌晨0-5点，用昨天的数据
+            target_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            target_date = now.strftime("%Y-%m-%d")
+
+        # 查询数据
+        cursor.execute("""
+            SELECT date, steps, calories, active_seconds,
+                   heart_rate_resting, heart_rate_min, heart_rate_max
+            FROM daily_metrics
+            WHERE date = ?
+        """, (target_date,))
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        date, steps, calories, active, hr_resting, hr_min, hr_max = row
+
+        # 如果今天步数很少（<1000），尝试获取昨天的
+        if steps < 1000:
+            yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            cursor.execute("""
+                SELECT date, steps, calories, active_seconds,
+                       heart_rate_resting, heart_rate_min, heart_rate_max
+                FROM daily_metrics
+                WHERE date = ?
+            """, (yesterday,))
+            row2 = cursor.fetchone()
+            if row2 and row2[1] > steps * 2:
+                date, steps, calories, active, hr_resting, hr_min, hr_max = row2
+
+        # 获取睡眠数据
+        cursor.execute("""
+            SELECT duration_hours, quality_percent
+            FROM sleep_data
+            WHERE date = ? OR date = ?
+            ORDER BY date DESC
+            LIMIT 1
+        """, (date, (now - timedelta(days=1)).strftime("%Y-%m-%d")))
+        sleep_row = cursor.fetchone()
+
+        sleep = {}
+        if sleep_row:
+            sleep = {
+                'duration_hours': sleep_row[0] or 0,
+                'quality_percent': sleep_row[1] or 0
+            }
+
+        # 获取运动数据
+        cursor.execute("""
+            SELECT sport_name, duration_minutes, calories
+            FROM workouts
+            WHERE date = ?
+            ORDER BY start_time DESC
+        """, (date,))
+        workout_rows = cursor.fetchall()
+
+        workouts = []
+        for wr in workout_rows:
+            workouts.append({
+                'name': wr[0],
+                'duration_minutes': wr[1] or 0,
+                'calories': wr[2] or 0
+            })
+
+        conn.close()
+
+        # 组装数据（兼容旧格式）
+        return {
+            'date': date,
+            'summary': {
+                'steps': steps or 0,
+                'calories': calories or 0,
+                'heart_rate_resting': hr_resting or 0,
+                'active_seconds': active or 0
+            },
+            'sleep': sleep,
+            'workouts': workouts
+        }
+
+    except Exception as e:
+        print(f"❌ 从数据库加载数据失败: {e}", file=sys.stderr)
         return None
 
 def generate_morning_report(data):
