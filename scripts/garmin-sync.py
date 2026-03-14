@@ -315,22 +315,66 @@ def get_body_battery(garmin_client, date_str):
         'highest': 0,
         'lowest': 0,
         'current': 0,
+        'most_recent': 0,  # 实时值（来自时序数据最新值）
     }
 
     try:
-        stats = garmin_client.get_stats(date_str)
+        # 使用 get_body_battery() API 获取时序数据
+        bb_data = garmin_client.get_body_battery(date_str)
 
-        data['charged'] = stats.get('bodyBatteryChargedValue', 0)
-        data['drained'] = stats.get('bodyBatteryDrainedValue', 0)
-        data['highest'] = stats.get('bodyBatteryHighestValue', 0)
-        data['lowest'] = stats.get('bodyBatteryLowestValue', 0)
+        if bb_data and isinstance(bb_data, list) and len(bb_data) > 0:
+            day_data = bb_data[0]
 
-        # Calculate current (highest - drained + charged)
-        # Note: This is an approximation; actual current may differ
-        data['current'] = max(data['lowest'], min(data['highest'], data['highest'] - data['drained'] + data['charged']))
+            data['charged'] = day_data.get('charged', 0)
+            data['drained'] = day_data.get('drained', 0)
+
+            # 从时序数组获取最高、最低、当前值
+            values_array = day_data.get('bodyBatteryValuesArray', [])
+            if values_array:
+                battery_values = [v[1] for v in values_array if isinstance(v, list) and len(v) >= 2]
+                if battery_values:
+                    data['highest'] = max(battery_values)
+                    data['lowest'] = min(battery_values)
+                    # 最后一个值是实时值
+                    data['current'] = battery_values[-1]
+                    data['most_recent'] = battery_values[-1]
+                else:
+                    # 如果时序为空，回退到旧方法
+                    stats = garmin_client.get_stats(date_str)
+                    data['highest'] = stats.get('bodyBatteryHighestValue', 0)
+                    data['lowest'] = stats.get('bodyBatteryLowestValue', 0)
+                    data['current'] = stats.get('bodyBatteryHighestValue', 0) - data['drained'] + data['charged']
+                    data['most_recent'] = data['current']
+            else:
+                # 没有时序数据，使用 get_stats()
+                stats = garmin_client.get_stats(date_str)
+                data['highest'] = stats.get('bodyBatteryHighestValue', 0)
+                data['lowest'] = stats.get('bodyBatteryLowestValue', 0)
+                data['current'] = data['highest'] - data['drained'] + data['charged']
+                data['most_recent'] = data['current']
+        else:
+            # API返回格式异常，回退到 get_stats()
+            stats = garmin_client.get_stats(date_str)
+            data['charged'] = stats.get('bodyBatteryChargedValue', 0)
+            data['drained'] = stats.get('bodyBatteryDrainedValue', 0)
+            data['highest'] = stats.get('bodyBatteryHighestValue', 0)
+            data['lowest'] = stats.get('bodyBatteryLowestValue', 0)
+            data['current'] = data['highest'] - data['drained'] + data['charged']
+            data['most_recent'] = data['current']
 
     except Exception as e:
         print(f"⚠️  Body battery error: {e}", file=sys.stderr)
+        # 出错时回退到 get_stats()
+        try:
+            stats = garmin_client.get_stats(date_str)
+            data['charged'] = stats.get('bodyBatteryChargedValue', 0)
+            data['drained'] = stats.get('bodyBatteryDrainedValue', 0)
+            data['highest'] = stats.get('bodyBatteryHighestValue', 0)
+            data['lowest'] = stats.get('bodyBatteryLowestValue', 0)
+            data['current'] = data['highest'] - data['drained'] + data['charged']
+            data['most_recent'] = data['current']
+        except:
+            pass
 
     return data
 
