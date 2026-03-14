@@ -278,4 +278,4 @@ sqlite3 ~/.clawdbot/garmin/data.db "SELECT * FROM sync_log ORDER BY sync_time DE
 ## 🔗 相关项目
 
 - 佳明健康仪表盘：`/home/roots/garmin-dashboard/`
-- 前端访问：http://175.6.27.232:9999
+- 数据库：`~/.clawdbot/garmin/data.db`
