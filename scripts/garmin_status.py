@@ -47,6 +47,8 @@ def format_garmin_status():
     lines.append(f"  • 卡路里: {summary.get('calories', 0):.0f}")
     lines.append(f"  • 活动时长: {summary.get('active_minutes', 0)} 分钟")
     lines.append(f"  • 距离: {summary.get('distance_km', 0):.2f} km")
+    if summary.get('weight_kg', 0):
+        lines.append(f"  • 体重: {summary.get('weight_kg', 0):.1f} kg")
     lines.append("")
 
     # Sleep data

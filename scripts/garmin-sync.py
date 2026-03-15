@@ -78,6 +78,8 @@ def get_daily_summary(garmin_client, date_str):
         'intensity_minutes': 0,
         'moderate_intensity_minutes': 0,
         'vigorous_intensity_minutes': 0,
+        'weight_kg': 0,
+        'weight_lbs': 0,
     }
 
     try:
@@ -108,6 +110,15 @@ def get_daily_summary(garmin_client, date_str):
 
     except Exception as e:
         print(f"⚠️  Stats error: {e}", file=sys.stderr)
+
+    # Weight data (best-effort)
+    try:
+        weight = get_weight_data(garmin_client, date_str)
+        if weight:
+            data['weight_kg'] = weight.get('weight_kg', 0)
+            data['weight_lbs'] = weight.get('weight_lbs', 0)
+    except Exception as e:
+        print(f"⚠️  Weight data error: {e}", file=sys.stderr)
 
     return data
 
@@ -497,6 +508,144 @@ def get_respiration_data(garmin_client, date_str):
     return data
 
 
+def _normalize_weight_kg(value, unit=None):
+    if value is None:
+        return None
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        return None
+    if weight <= 0:
+        return None
+    if unit:
+        unit_upper = str(unit).upper()
+        if unit_upper in ("LB", "LBS", "POUND", "POUNDS"):
+            return round(weight * 0.45359237, 2)
+        if unit_upper in ("KG", "KGS", "KILOGRAM", "KILOGRAMS"):
+            return round(weight, 2)
+    return round(weight, 2)
+
+
+def _extract_weight_from_entry(entry):
+    if not isinstance(entry, dict):
+        return None, None
+
+    # Common key variants
+    key_candidates = [
+        "weightKg",
+        "weight_kg",
+        "weightInKg",
+        "weight",
+        "bodyWeight",
+        "body_weight",
+    ]
+    unit = entry.get("weightUnit") or entry.get("unit") or entry.get("unitKey")
+
+    for key in key_candidates:
+        if key in entry and entry[key] is not None:
+            weight_kg = _normalize_weight_kg(entry[key], unit)
+            if weight_kg:
+                return weight_kg, unit
+
+    return None, None
+
+
+def get_weight_data(garmin_client, date_str):
+    """Get daily weight data (best-effort across API variants)"""
+
+    data = {
+        "weight_kg": 0,
+        "weight_lbs": 0,
+        "source_date": None,
+    }
+
+    try:
+        # Try body composition endpoint
+        if hasattr(garmin_client, "get_body_composition"):
+            body_comp = garmin_client.get_body_composition(date_str)
+        else:
+            body_comp = None
+
+        entry = None
+        if isinstance(body_comp, dict):
+            # Possible list containers
+            for key in ("dateWeightList", "weightSamples", "weights", "bodyCompositionList"):
+                if key in body_comp and isinstance(body_comp[key], list) and body_comp[key]:
+                    entry = body_comp[key][0]
+                    break
+            if entry is None:
+                entry = body_comp
+        elif isinstance(body_comp, list) and body_comp:
+            entry = body_comp[0]
+
+        weight_kg, unit = _extract_weight_from_entry(entry) if entry else (None, None)
+
+        # Fallback: try weight endpoint
+        if not weight_kg and hasattr(garmin_client, "get_weight_data"):
+            weight_data = garmin_client.get_weight_data(date_str)
+            entry = None
+            if isinstance(weight_data, dict):
+                for key in ("dateWeightList", "weightSamples", "weights"):
+                    if key in weight_data and isinstance(weight_data[key], list) and weight_data[key]:
+                        entry = weight_data[key][0]
+                        break
+                if entry is None:
+                    entry = weight_data
+            elif isinstance(weight_data, list) and weight_data:
+                entry = weight_data[0]
+
+            weight_kg, unit = _extract_weight_from_entry(entry) if entry else (None, None)
+
+        if weight_kg:
+            data["weight_kg"] = weight_kg
+            data["weight_lbs"] = round(weight_kg / 0.45359237, 2)
+            data["source_date"] = date_str
+
+        # Fallback: get weigh-ins range (returns weight in grams)
+        if not data["weight_kg"] and hasattr(garmin_client, "get_weigh_ins"):
+            from datetime import datetime, timedelta
+
+            end_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            start_date = end_date - timedelta(days=7)
+
+            weigh_ins = garmin_client.get_weigh_ins(
+                start_date.isoformat(), end_date.isoformat()
+            )
+
+            latest = None
+            if isinstance(weigh_ins, dict):
+                summaries = weigh_ins.get("dailyWeightSummaries", [])
+                # Find the latest entry by calendarDate then timestamp
+                for summary in summaries:
+                    candidate = summary.get("latestWeight") or None
+                    if not candidate:
+                        metrics = summary.get("allWeightMetrics") or []
+                        candidate = metrics[-1] if metrics else None
+                    if not candidate:
+                        continue
+                    if latest is None:
+                        latest = candidate
+                    else:
+                        # Compare by timestampGMT if available
+                        ts_new = candidate.get("timestampGMT") or candidate.get("date") or 0
+                        ts_old = latest.get("timestampGMT") or latest.get("date") or 0
+                        if ts_new and ts_new > ts_old:
+                            latest = candidate
+
+            if latest:
+                weight_g = latest.get("weight")
+                if isinstance(weight_g, (int, float)) and weight_g > 0:
+                    weight_kg = round(weight_g / 1000, 2)
+                    data["weight_kg"] = weight_kg
+                    data["weight_lbs"] = round(weight_kg / 0.45359237, 2)
+                    data["source_date"] = latest.get("calendarDate") or date_str
+
+    except Exception as e:
+        print(f"⚠️  Weight data error: {e}", file=sys.stderr)
+
+    return data
+
+
 def get_lactate_threshold(garmin_client):
     """Get lactate threshold (functional threshold power) data"""
 
@@ -579,6 +728,7 @@ def sync_all(output_file=None):
         'summary': summary,
         'sleep': get_sleep_data(garmin_client, actual_date),
         'workouts': workouts,
+        'weight': get_weight_data(garmin_client, actual_date),
         'vo2_max': get_vo2_max(garmin_client, actual_date),
         'body_battery': get_body_battery(garmin_client, actual_date),
         'stress': get_stress_data(garmin_client, actual_date),

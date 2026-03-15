@@ -252,6 +252,19 @@ def get_daily_summary(garmin_client, date: str) -> Dict:
     data = reader.get_metrics_by_date(date)
 
     if data:
+        weight_kg = (
+            data.get('weight_kg')
+            or data.get('weight')
+            or data.get('body_weight')
+            or data.get('weightKg')
+            or 0
+        )
+        try:
+            weight_kg = float(weight_kg) if weight_kg else 0
+        except (TypeError, ValueError):
+            weight_kg = 0
+        weight_lbs = round(weight_kg / 0.45359237, 2) if weight_kg else 0
+
         return {
             'steps': data.get('steps', 0),
             'heart_rate_resting': data.get('heart_rate_resting', 0),
@@ -275,6 +288,8 @@ def get_daily_summary(garmin_client, date: str) -> Dict:
             'hrv_last_night': data.get('hrv_last_night', 0),
             'vo2_max': data.get('vo2_max', 0),
             'fitness_age': data.get('fitness_age', 0),
+            'weight_kg': weight_kg,
+            'weight_lbs': weight_lbs,
         }
     else:
         # 数据库中没有，返回默认值

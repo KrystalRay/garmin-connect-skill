@@ -19,6 +19,7 @@
 - **距离** - 每日距离（公里）
 - **爬楼** - 爬楼层数
 - **活动时长** - 活动分钟数、中等/剧烈运动时长
+- **体重** - 每日体重（公斤）
 
 ### 心率数据
 - **静息心率** - 休息时心率
@@ -176,6 +177,7 @@ workouts = get_workouts(None)
 | steps | 步数 |
 | calories/active/bmr | 卡路里（总/活动/BMR） |
 | heart_rate_resting/min/max | 心率（静息/最低/最高） |
+| weight_kg | 体重（公斤） |
 | body_battery_current/highest/lowest | 身体电量（当前/最高/最低） |
 | stress_average/max | 压力（平均/最高） |
 | hrv_last_night | HRV（昨晚） |

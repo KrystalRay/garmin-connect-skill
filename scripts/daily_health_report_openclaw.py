@@ -147,6 +147,15 @@ def generate_morning_report_enhanced(data):
     hr_max = daily.get('heart_rate_max', 0)
     lines.append(f"  • 静息心率：{hr_resting} bpm（范围：{hr_min}-{hr_max}）")
 
+    # 体重（新增，兼容旧字段）
+    weight_kg = daily.get('weight_kg') or daily.get('weight') or daily.get('body_weight') or 0
+    try:
+        weight_kg = float(weight_kg) if weight_kg else 0
+    except (TypeError, ValueError):
+        weight_kg = 0
+    if weight_kg > 0:
+        lines.append(f"  • 体重：{weight_kg:.1f} kg")
+
     # 压力（新增）
     stress_avg = daily.get('stress_average', 0)
     stress_pct = daily.get('stress_percentage', 0)
@@ -254,6 +263,15 @@ def generate_evening_report_enhanced(data):
     calories = daily.get('calories', 0)
     calories_active = daily.get('calories_active', 0)
     lines.append(f"  • 卡路里：{calories:,}（活动消耗{calories_active}）")
+
+    # 体重（新增，兼容旧字段）
+    weight_kg = daily.get('weight_kg') or daily.get('weight') or daily.get('body_weight') or 0
+    try:
+        weight_kg = float(weight_kg) if weight_kg else 0
+    except (TypeError, ValueError):
+        weight_kg = 0
+    if weight_kg > 0:
+        lines.append(f"  • 体重：{weight_kg:.1f} kg")
 
     lines.append("")
 
