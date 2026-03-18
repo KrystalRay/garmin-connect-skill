@@ -1,281 +1,232 @@
 ---
 name: garmin-connect
-description: "Garmin Connect integration for OpenClaw: sync fitness data (steps, HR, calories, workouts, sleep) using OAuth. Supports China (garmin.cn) and Global (garmin.com) regions. Data is stored in SQLite database for fast access."
+description: "Garmin Connect integration for OpenClaw. Sync Garmin data to workspace xlsx and infer daily muscle group (胸/背/肩膀/臀腿) from workouts."
 ---
 
 # Garmin Connect Skill
 
-同步你的佳明手表数据到 OpenClaw，支持中国大陆和全球账号。
+目标：把 Garmin Connect 可读取的数据稳定写入 workspace 下的 `训练饮食记录表.xlsx`，并且让 agent 有固定、可复用、低歧义的执行路径。
 
-## 🎯 新架构（2026-03-13更新）
+## 能力边界（必须统一口径）
 
-**核心变化：**
+### A) Garmin 官方 API 原生可获取（自动同步）
 
-- ✅ 单一SQLite数据库存储所有数据
-- ✅ 三种同步触发方式（定时/按需/手动）
-- ✅ 龙虾直接读取数据库（快速响应）
-- ✅ 完整数据支持（Body Battery、HRV、VO2 Max等）
-- ✅ 数据库字段从26个扩展到58个（2026-03-13下午重大升级）
-- ✅ 时序数据表支持（心率曲线、身体电量曲线等）
+- 每日步数、静息心率、最高/最低心率
+- 总消耗卡路里（含基础/活动拆分）
+- 睡眠总时长及阶段（深睡/浅睡/REM/清醒）
+- 运动记录（类型、时长、卡路里、距离、心率）
+- 体重相关（若设备侧有数据）
+- 压力/身体电量等可穿戴指标（依账户与设备数据而定）
 
-```
-佳明服务器 → 统一同步脚本 → SQLite数据库
-                              ├─ 龙虾skill（读取）
-                              └─ 网页前端（读取）
-```
+### B) Skill 二次推断可获取（非 Garmin 原生字段）
 
-## 🚀 2026-03-13 重大升级
+- 当日训练肌群：`胸 / 背 / 肩膀 / 臀腿`
+- 推断来源：`exerciseSets.category` 分类码优先 + 训练内容关键词 + 四肌群循环兜底
+- 当日训练摘要：自动汇总为 `训练动作`（可选写入 `备注`）
+- 推断理由：自动写入 `备注`（包含命中分类码、UNKNOWN数量、兜底原因）
 
-### 问题发现
-用户发现身体电量显示不一致（服务器79 vs 手表28），发现数据库同步不完整。
+### C) 仍需手动填写
 
-### 解决方案
+- 组数、次数、重量等力量训练细节
+- 饮食摄入、饮水、主观状态、消化/排便等非设备字段
 
-**1. 数据库Schema升级**
-- 新增35个字段：时长类、压力详细值、呼吸/血氧详细值、wellness字段等
-- 修复关键字段：`body_battery_current`从存最高值改为存最新值
-- 创建5个时序数据表：心率、身体电量、步数、压力、呼吸率曲线
-- 创建1个动态反馈事件表
-- 运动记录新增15个高级指标字段
+### D) 禁止错误表述
 
-**2. 同步策略优化**
-- **完整版（sync_all.py v2.0）**：包含所有字段和时序数据，适合手动完整同步
-- **简化版（sync_daily.py）**：只同步核心每日指标，适合定时任务
+- 不要说“skill 没有肌群识别功能”
+- 正确说法：Garmin API 不直接返回肌群，但本 skill 可按规则推断肌群
 
-**3. 数据完整度提升**
-- 标量字段：26% → 95%+
-- 核心指标：100%完整
-- 时序数据：表已创建，待后台同步
+## 这个 skill 的标准数据链路
 
-### 关键Bug修复
-```python
-# 旧逻辑（错误）
-body_battery_current = bodyBatteryHighestValue  # 79
+1. `scripts/garmin-auth.py`：一次性认证，保存凭证到 `~/.garth/session.json`
+2. `scripts/garmin-sync.py`：拉取 Garmin 数据到 `~/.clawdbot/.garmin-cache.json`
+3. `scripts/garmin_to_xlsx.py`：把缓存中的当日数据写入 `训练饮食记录表.xlsx`
+4. `scripts/garmin_backfill_to_xlsx.py`：按日期区间回填历史数据到 xlsx
+5. `scripts/sync_recent_days_to_xlsx.py`：默认同步最近2天（昨天+今天）
 
-# 新逻辑（正确）
-body_battery_current = bodyBatteryMostRecentValue  # 29
-```
+核心原则：优先通过列名写入，不用硬编码列号，避免错位。
 
-## 快速开始
+## Agent 操作手册（推荐）
 
-### 1. 认证（一次性）
-
-**中国大陆账号：**
+### 1) 首次初始化（只做一次）
 
 ```bash
-cd ~/openclaw/skills/garmin-connect
-python3 scripts/garmin-auth.py your-email@qq.com password --cn
+cd $HOME/.openclaw/workspace/skills/garmin-connect-skill
+python3 -m pip install -r requirements.txt
 ```
 
-**全球账号：**
+认证：
 
 ```bash
-python3 scripts/garmin-auth.py your-email@gmail.com password
+# 中国大陆账号
+python3 scripts/garmin-auth.py your-email@qq.com your-password --cn
+
+# 全球账号
+python3 scripts/garmin-auth.py your-email@gmail.com your-password
 ```
 
-认证成功后，凭证会加密保存到 `~/.garth/session.json`。
-
-### 2. 启动自动同步
-
-**systemd timer（推荐）：**
+### 2) 每次同步到 xlsx（主流程）
 
 ```bash
-# 已自动配置，每1小时同步一次
-sudo systemctl status garmin-sync.timer
+cd $HOME/.openclaw/workspace/skills/garmin-connect-skill
+# 推荐：至少同步昨天+今天（应对每天第一次同步）
+python3 scripts/sync_recent_days_to_xlsx.py
+
+# 仅同步当天（不推荐作为默认）
+python3 scripts/garmin_to_xlsx.py
 ```
 
-**手动触发：**
+该命令默认会：
+- 覆盖“昨天+今天”两天数据
+- 避免首次同步时昨天数据遗漏
+- 更新 `$HOME/.openclaw/workspace/训练饮食记录表.xlsx` 的对应日期行
+
+### 3) 常用参数
 
 ```bash
-python3 ~/.clawdbot/garmin/sync_all.py --source=manual
+# 最近3天
+python3 scripts/sync_recent_days_to_xlsx.py --days 3
+
+# 仅写入，不重新拉取 Garmin API
+python3 scripts/garmin_to_xlsx.py --no-sync
+
+# 指定日期
+python3 scripts/garmin_to_xlsx.py --date 2026-03-17
+
+# 预览改动（不落盘）
+python3 scripts/garmin_to_xlsx.py --dry-run
+
+# 指定目标 xlsx
+python3 scripts/garmin_to_xlsx.py --xlsx $HOME/.openclaw/workspace/训练饮食记录表.xlsx
+
+# 当天训练内容总结（写入训练动作；可同时写入备注）
+python3 scripts/garmin_to_xlsx.py --write-summary-to-remark
 ```
 
-### 3. 测试数据读取
-
-**从数据库读取（快速）：**
+### 4) 历史回填（新增）
 
 ```bash
-python3 scripts/garmin_db_reader.py
+# 回填一个区间（包含起止日期）
+python3 scripts/garmin_backfill_to_xlsx.py --start-date 2026-02-14 --end-date 2026-03-17
+
+# 只预览回填步骤，不写文件
+python3 scripts/garmin_backfill_to_xlsx.py --start-date 2026-02-14 --end-date 2026-03-17 --dry-run
+
+# 保留旧值（不清空缺失字段）时再加这个参数
+python3 scripts/garmin_backfill_to_xlsx.py --start-date 2026-02-14 --end-date 2026-03-17 --no-clear-missing
 ```
 
-**从API读取（慢速，用于测试）：**
+## 默认写入字段（xlsx）
 
+- `体重(kg)`
+- `静息心率(次/分)`
+- `步数`
+- `总消耗卡路里(大卡)`
+- `睡眠时长(小时)`
+- `训练时长(分钟)`
+- `训练动作`
+- `训练部位`
+- `是否训练`（有训练动作时写入“是”）
+- 可选：`备注`（使用 `--write-summary-to-remark` 时写入训练摘要）
+
+训练摘要格式示例：
+- `有氧运动40分/397kcal；力量训练88分/462kcal（共2项 128分 859kcal）`
+
+## 训练肌群推断规则（重要）
+
+Garmin 可以返回当天训练内容。agent 必须根据 `训练动作` 推断并写入 `训练部位`，且只允许以下四类：
+- `胸`
+- `背`
+- `肩膀`
+- `臀腿`
+
+禁止写入：`全身 / 上肢 / 下肢 / 核心`。
+
+推断优先级：
+1. **关键词直推**：若训练内容包含明确动作词（如卧推/划船/推举/深蹲等），按命中最多的肌群归类。
+2. **循环兜底**：若 Garmin 名称过于泛化（如仅“力量训练”），按四肌群循环推断。
+3. **循环顺序**：`胸 -> 背 -> 肩膀 -> 臀腿 -> 胸 ...`
+4. **当前默认锚点**：`2026-03-18` 视为 `胸` 日（后续按天递推）。
+
+建议命令：
 ```bash
-python3 scripts/garmin-sync.py
+python3 scripts/garmin_to_xlsx.py --write-summary-to-remark
 ```
 
-## 📊 数据结构
+## 如何查询当日肌群（给 OpenClaw）
 
-### 数据库位置
+必须使用脚本查询，不要回答“skill 没有肌群识别功能”。
 
-```
-/home/roots/.clawdbot/garmin/data.db
-```
-
-### 包含的数据
-
-**每日健康指标 (daily_metrics)：**
-
-- 基础：步数、距离、卡路里、活动时长、爬楼
-- 心率：静息/最低/最高
-- 身体电量：当前/最高/最低/充电/消耗
-- 压力：平均/最高
-- HRV：昨晚HRV
-- 呼吸率
-- VO2 Max
-- 健身年龄
-
-**睡眠数据 (sleep_data)：**
-
-- 时长、睡眠分数、质量百分比
-- 深/REM/浅睡、清醒时间
-- 午睡详情
-
-**运动记录 (workouts)：**
-
-- 时间戳、类型、名称、距离、时长、卡路里、心率
-
-## 🔄 同步触发方式
-
-### 1. 系统定时（自动）
-
-每1小时自动同步一次（systemd timer）：
-
+查询命令（只查不写表）：
 ```bash
-sudo systemctl start garmin-sync.timer
-sudo systemctl enable garmin-sync.timer
+cd $HOME/.openclaw/workspace/skills/garmin-connect-skill
+python3 scripts/garmin_to_xlsx.py --query-muscle-group --date 2026-03-17
 ```
 
-查看下次同步时间：
+返回 JSON 示例：
+```json
+{
+  "date": "2026-03-17",
+  "has_training": true,
+  "muscle_group": "臀腿",
+  "workout_summary": "力量训练84分/485kcal；有氧运动40分/413kcal（共2项 124分 898kcal）",
+  "inference_method": "garmin_category",
+  "inference_reason": "命中Garmin分类码[...]",
+  "category_counts": {"PULL_UP": 8, "UNKNOWN": 22},
+  "allowed_groups": ["胸", "背", "肩膀", "臀腿"]
+}
+```
 
+查询后直接写入 xlsx：
 ```bash
-systemctl list-timers | grep garmin
+python3 scripts/garmin_to_xlsx.py --date 2026-03-17 --write-summary-to-remark
 ```
 
-### 2. 龙虾按需触发
-
-当你问"我刚才跑的咋样？"时：
-
-```python
-from scripts.garmin_db_reader import trigger_sync_if_needed
-
-# 如果数据超过5分钟，自动触发同步
-trigger_sync_if_needed(max_age_minutes=5)
-```
-
-然后读取数据库回答。
-
-### 3. 手动触发
-
+如果不想写入推断理由到备注：
 ```bash
-# 从命令行
-python3 ~/.clawdbot/garmin/sync_all.py --source=manual
-
-# 从网页（前端API）
-POST /api/sync
+python3 scripts/garmin_to_xlsx.py --date 2026-03-17 --write-summary-to-remark --no-write-inference-reason
 ```
 
-## 📝 使用示例
+标准回复模板（OpenClaw）：
+- `Garmin API 原生不返回具体肌群；本 skill 已按训练内容+循环规则推断当日肌群为 <肌群>，并可自动写入训练记录表。`
 
-### 在OpenClaw中使用
+## 常见排查
 
-**方式1：从数据库读取（推荐）**
-
-```python
-import sys
-sys.path.insert(0, '~/openclaw/skills/garmin-connect/scripts')
-from garmin_db_reader import GarminDataReader, trigger_sync_if_needed
-
-# 检查数据新鲜度，必要时触发同步
-trigger_sync_if_needed(max_age_minutes=5)
-
-# 读取数据
-reader = GarminDataReader()
-today = reader.get_today_metrics()
-print(f"今日步数: {today['steps']}")
-print(f"身体电量: {today['body_battery_current']}")
-```
-
-**方式2：直接API调用（兼容旧代码）**
-
-```python
-from garmin_db_reader import get_daily_summary, get_workouts
-# garmin_client 参数会被忽略，直接读数据库
-data = get_daily_summary(None, '2026-03-13')
-```
-
-### 查看同步状态
-
-```python
-reader = GarminDataReader()
-status = reader.get_sync_status()
-print(f"最后同步: {status['last_sync_time']}")
-print(f"每日记录: {status['daily_metrics_count']} 条")
-print(f"运动记录: {status['workouts_count']} 条")
-```
-
-## 🔧 故障排除
-
-### 数据库不存在
-
-```bash
-# 手动运行一次同步
-python3 ~/.clawdbot/garmin/sync_all.py --source=manual
-```
-
-### 同步失败
-
-检查凭证：
+### 1) 认证失败
 
 ```bash
 cat ~/.garth/session.json
+python3 scripts/garmin-auth.py your-email your-password [--cn]
 ```
 
-重新认证：
+### 2) 同步失败
 
 ```bash
-cd ~/openclaw/skills/garmin-connect
-python3 scripts/garmin-auth.py your-email password
+python3 scripts/garmin-sync.py
+cat ~/.clawdbot/.garmin-cache.json
 ```
 
-### 查看同步日志
+### 2.1) 是否自动同步
+
+- 当前 skill 默认**不自带系统级定时任务**
+- 现在的推荐做法是手动执行：`python3 scripts/sync_recent_days_to_xlsx.py`
+- 如果你需要，我可以再加 `cron` / `launchd` / `systemd` 的定时配置模板
+
+### 3) xlsx 未更新
 
 ```bash
-# systemd日志
-sudo journalctl -u garmin-sync.service -f
-
-# 数据库同步日志
-sqlite3 ~/.clawdbot/garmin/data.db "SELECT * FROM sync_log ORDER BY sync_time DESC LIMIT 10"
+python3 scripts/garmin_to_xlsx.py --dry-run
+python3 scripts/garmin_to_xlsx.py --date 2026-03-17
+python3 scripts/garmin_backfill_to_xlsx.py --start-date 2026-03-10 --end-date 2026-03-17
 ```
 
-## 📁 文件结构
+## 对 agent 的执行约束
 
-```
-~/.clawdbot/garmin/
-├── data.db                    # SQLite数据库
-├── sync_daemon.py             # 数据库管理
-└── sync_all.py                # 完整同步脚本
-
-~/openclaw/skills/garmin-connect/
-├── scripts/
-│   ├── garmin_db_reader.py    # 数据库读取（新增）
-│   ├── garmin-auth.py         # 认证
-│   ├── garmin-sync.py         # API获取（兼容）
-│   └── ...
-└── SKILL.md                   # 本文件
-```
-
-## 🆕 vs 旧版本
-
-| 特性       | 旧版本        | 新版本                   |
-| ---------- | ------------- | ------------------------ |
-| 数据存储   | 无            | SQLite数据库             |
-| 响应速度   | API调用（慢） | 数据库读取（快）         |
-| 同步触发   | cron（5分钟） | timer（1小时）+ 按需     |
-| 数据完整性 | 基础指标      | 完整（含Body Battery等） |
-| 消费者     | 仅skill       | skill + 网页前端         |
-
-## 🔗 相关项目
-
-- 佳明健康仪表盘：`/home/roots/garmin-dashboard/`
-- 数据库：`~/.clawdbot/garmin/data.db`
+1. 用户要“同步 Garmin 到记录表”时，优先执行：`python3 scripts/sync_recent_days_to_xlsx.py`（至少覆盖昨天+今天）
+2. 不要再使用历史的 CSV 脚本作为主入口（CSV 仅保留兼容用途）
+3. 写入失败时先 `--dry-run`，再检查认证、缓存文件、xlsx 路径
+4. 用户提到“回填/补历史数据”时，优先执行 `python3 scripts/garmin_backfill_to_xlsx.py --start-date ... --end-date ...`
+5. 回复用户时给出：写入日期、更新字段、失败字段（如有）
+6. 用户提到“总结当天训练内容”时，执行：`python3 scripts/garmin_to_xlsx.py --write-summary-to-remark`
+7. 用户提到“推断当日训练肌群”时，必须按“四肌群循环规则”输出并写入 `训练部位`
+8. 用户问“今天练哪个肌群”时，先执行：`python3 scripts/garmin_to_xlsx.py --query-muscle-group --date <当天>`，再回复结果
+9. 若返回含 `UNKNOWN` 分类码，必须结合 `inference_reason` 解释为何仍可推断（或为何触发循环兜底）

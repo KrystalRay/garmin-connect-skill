@@ -5,9 +5,11 @@ Syncs all fitness data using saved credentials
 Supports both global (garmin.com) and China (garmin.cn) regions
 """
 
+import argparse
 import json
 import os
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -241,6 +243,71 @@ def get_sleep_data(garmin_client, date_str):
 def get_workouts(garmin_client):
     """Get recent workouts with correct timestamps"""
 
+    def get_exercise_metadata(garmin_client, activity, activity_id):
+        data = {
+            "exercise_category_counts": {},
+            "exercise_categories_top": [],
+            "exercise_unknown_count": 0,
+            "active_set_count": 0,
+            "rest_set_count": 0,
+        }
+        try:
+            activity_type = activity.get("activityType", {})
+            type_key = activity_type.get("typeKey", "") if isinstance(activity_type, dict) else ""
+
+            # Only strength activities usually have meaningful set-level categories.
+            if type_key != "strength_training":
+                return data
+
+            sets_payload = garmin_client.get_activity_exercise_sets(activity_id)
+            if not isinstance(sets_payload, dict):
+                return data
+
+            exercise_sets = sets_payload.get("exerciseSets", [])
+            if not isinstance(exercise_sets, list):
+                return data
+
+            category_counter = Counter()
+            unknown = 0
+            active_count = 0
+            rest_count = 0
+
+            for item in exercise_sets:
+                if not isinstance(item, dict):
+                    continue
+
+                set_type = str(item.get("setType") or "").upper()
+                if set_type == "ACTIVE":
+                    active_count += 1
+                elif set_type == "REST":
+                    rest_count += 1
+
+                exercises = item.get("exercises")
+                if not isinstance(exercises, list) or not exercises:
+                    unknown += 1
+                    continue
+
+                found_any_category = False
+                for ex in exercises:
+                    if not isinstance(ex, dict):
+                        continue
+                    category = ex.get("category")
+                    if category:
+                        category_counter[str(category).upper()] += 1
+                        found_any_category = True
+                if not found_any_category:
+                    unknown += 1
+
+            data["exercise_category_counts"] = dict(category_counter)
+            data["exercise_categories_top"] = [c for c, _ in category_counter.most_common(8)]
+            data["exercise_unknown_count"] = unknown
+            data["active_set_count"] = active_count
+            data["rest_set_count"] = rest_count
+            return data
+        except Exception as e:
+            print(f"⚠️  Exercise sets error ({activity_id}): {e}", file=sys.stderr)
+            return data
+
     workouts = []
 
     try:
@@ -261,7 +328,11 @@ def get_workouts(garmin_client):
                 except Exception as e:
                     print(f"⚠️  Failed to parse startTimeGMT: {e}", file=sys.stderr)
 
+            activity_id = activity.get("activityId")
+            exercise_meta = get_exercise_metadata(garmin_client=garmin_client, activity=activity, activity_id=activity_id)
+
             workout = {
+                'activity_id': activity_id,
                 'type': activity.get('activityType', 'Unknown'),
                 'name': activity.get('activityName', 'Unnamed'),
                 'distance_km': round(activity.get('distance', 0) / 1000, 2),
@@ -271,6 +342,7 @@ def get_workouts(garmin_client):
                 'heart_rate_max': activity.get('maxHeartRate', 0),
                 'timestamp': timestamp,  # 正确的Unix时间戳
                 'date': date_str,  # 日期字符串 (YYYY-MM-DD)
+                **exercise_meta,
             }
             workouts.append(workout)
 
@@ -523,6 +595,9 @@ def _normalize_weight_kg(value, unit=None):
             return round(weight * 0.45359237, 2)
         if unit_upper in ("KG", "KGS", "KILOGRAM", "KILOGRAMS"):
             return round(weight, 2)
+    # Some endpoints return grams without explicit unit (e.g. 82699 -> 82.699kg)
+    if not unit and weight > 300:
+        weight = weight / 1000
     return round(weight, 2)
 
 
@@ -678,7 +753,7 @@ def get_lactate_threshold(garmin_client):
 
     return data
 
-def sync_all(output_file=None):
+def sync_all(output_file=None, target_date=None):
     """Sync all Garmin data including all available health metrics"""
 
     garmin_client = get_garmin_client()
@@ -688,15 +763,19 @@ def sync_all(output_file=None):
     from datetime import timedelta, timezone
 
     # 获取北京时间（UTC+8）
-    beijing_tz = timezone(timedelta(hours=8))
-    now_beijing = datetime.now(beijing_tz)
-    hour = now_beijing.hour
-
-    # 智能日期选择：如果现在是0-5点，视为前一天
-    if hour < 5:
-        target_date = (now_beijing - timedelta(days=1)).strftime("%Y-%m-%d")
+    explicit_target_date = target_date is not None
+    if target_date:
+        datetime.strptime(target_date, "%Y-%m-%d")
     else:
-        target_date = now_beijing.strftime("%Y-%m-%d")
+        beijing_tz = timezone(timedelta(hours=8))
+        now_beijing = datetime.now(beijing_tz)
+        hour = now_beijing.hour
+
+        # 智能日期选择：如果现在是0-5点，视为前一天
+        if hour < 5:
+            target_date = (now_beijing - timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            target_date = now_beijing.strftime("%Y-%m-%d")
 
     # 先获取运动记录（用于推断实际数据日期）
     workouts = get_workouts(garmin_client)
@@ -704,7 +783,9 @@ def sync_all(output_file=None):
     # 根据最新运动记录的日期推断实际数据日期
     actual_date = target_date  # 默认使用目标日期
 
-    if workouts and len(workouts) > 0:
+    if explicit_target_date and workouts:
+        workouts = [w for w in workouts if w.get("date") == target_date]
+    elif workouts:
         # 找到最新的有日期的运动记录
         for workout in workouts:
             if 'date' in workout and workout['date']:
@@ -740,8 +821,9 @@ def sync_all(output_file=None):
 
     # Save to file if specified
     if output_file:
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        with open(output_file, 'w') as f:
+        output_path = Path(output_file).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open('w') as f:
             json.dump(all_data, f, indent=2)
 
     # Print JSON to stdout
@@ -750,12 +832,24 @@ def sync_all(output_file=None):
     return all_data
 
 if __name__ == "__main__":
-    
-    # Default cache file
-    cache_file = os.path.expanduser('~/.clawdbot/.garmin-cache.json')
-    
-    # Use custom path if provided
-    if len(sys.argv) > 1:
-        cache_file = sys.argv[1]
-    
-    sync_all(cache_file)
+    parser = argparse.ArgumentParser(description="Sync Garmin data to cache JSON.")
+    parser.add_argument(
+        "legacy_output",
+        nargs="?",
+        default=None,
+        help="Legacy positional output path for compatibility.",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Cache file path. Default: ~/.clawdbot/.garmin-cache.json",
+    )
+    parser.add_argument(
+        "--date",
+        default=None,
+        help="Sync a specific date (YYYY-MM-DD).",
+    )
+    args = parser.parse_args()
+
+    cache_file = args.output or args.legacy_output or os.path.expanduser("~/.clawdbot/.garmin-cache.json")
+    sync_all(cache_file, args.date)
