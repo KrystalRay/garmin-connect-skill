@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from collections import Counter, OrderedDict
@@ -80,6 +81,13 @@ NAME_KEYWORD_RULES = {
     "肩膀": ("肩推", "推举", "侧平举", "前平举", "后束", "面拉", "shoulder", "press", "deltoid"),
     "臀腿": ("深蹲", "腿举", "腿弯举", "腿伸展", "弓步", "臀桥", "臀推", "小腿", "squat", "leg", "glute", "hip"),
 }
+EMPTY_TEXT_TOKENS = {"", "/", "／", "-", "--", "—", "无", "none", "n/a", "na", "null"}
+MEAL_HEADERS = ("早餐", "午餐", "晚餐", "加餐")
+SUMMARY_HEADERS = ("热量和营养成分分析", "饮食总结")
+CALORIE_HEADERS = ("总热量(大卡)", "总热量摄入(大卡)")
+PROTEIN_HEADERS = ("蛋白质摄入(g)",)
+CARB_HEADERS = ("碳水摄入(g)",)
+FAT_HEADERS = ("脂肪摄入(g)",)
 
 
 def parse_args() -> argparse.Namespace:
@@ -221,6 +229,162 @@ def get_header_map(ws, header_row: int) -> Dict[str, int]:
         if isinstance(header, str) and header.strip():
             header_map[header.strip()] = col
     return header_map
+
+
+def first_existing_col(header_map: Dict[str, int], aliases: Iterable[str]) -> Optional[int]:
+    for name in aliases:
+        col = header_map.get(name)
+        if col:
+            return col
+    return None
+
+
+def normalize_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.lower() in EMPTY_TEXT_TOKENS:
+        return None
+    return text
+
+
+def parse_metric_from_summary(summary_text: str, keywords: Iterable[str]) -> Optional[float]:
+    if not summary_text:
+        return None
+    escaped = [re.escape(k) for k in keywords]
+    if not escaped:
+        return None
+    segment_pattern = rf"(?:{'|'.join(escaped)})[^\n]*"
+    for match in re.finditer(segment_pattern, summary_text, flags=re.IGNORECASE):
+        segment = match.group(0)
+        median = re.search(r"中位(?:值)?(?:约)?\s*([0-9]+(?:\.[0-9]+)?)", segment)
+        if median:
+            return float(median.group(1))
+        ranged = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*[-–~～至到]\s*([0-9]+(?:\.[0-9]+)?)", segment)
+        if ranged:
+            low = float(ranged.group(1))
+            high = float(ranged.group(2))
+            return (low + high) / 2.0
+        number = re.search(r"([0-9]+(?:\.[0-9]+)?)", segment)
+        if number:
+            return float(number.group(1))
+    return None
+
+
+def parse_nutrition_from_summary(summary_text: Optional[str]) -> Dict[str, float]:
+    text = normalize_text(summary_text)
+    if not text:
+        return {}
+    return {
+        "calories": parse_metric_from_summary(text, ("总热量", "热量", "kcal", "大卡", "千卡")),
+        "protein": parse_metric_from_summary(text, ("蛋白质", "protein")),
+        "carb": parse_metric_from_summary(text, ("碳水", "碳水化合物", "carb")),
+        "fat": parse_metric_from_summary(text, ("脂肪", "fat")),
+    }
+
+
+def maybe_write_cell(ws, row: int, col: Optional[int], value: object) -> bool:
+    if not col or value is None:
+        return False
+    cell = ws.cell(row, col)
+    existing = cell.value
+    if normalize_text(existing) is not None:
+        return False
+    cell.value = value
+    return True
+
+
+def read_number(value: object) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.startswith("="):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def build_nutrition_summary_text(calories: Optional[float], protein: Optional[float], carb: Optional[float], fat: Optional[float]) -> Optional[str]:
+    parts: List[str] = []
+    if calories and calories > 0:
+        parts.append(f"总热量约{int(round(calories))}kcal")
+    if protein and protein > 0:
+        parts.append(f"蛋白质约{int(round(protein))}g")
+    if carb and carb > 0:
+        parts.append(f"碳水约{int(round(carb))}g")
+    if fat and fat > 0:
+        parts.append(f"脂肪约{int(round(fat))}g")
+    if not parts:
+        return None
+    return "；".join(parts)
+
+
+def sync_nutrition_from_row(ws, row: int, header_map: Dict[str, int]) -> Tuple[Dict[str, object], Dict[str, object]]:
+    written: Dict[str, object] = {}
+    meal_values: Dict[str, Optional[str]] = {}
+    for header in MEAL_HEADERS:
+        col = header_map.get(header)
+        meal_values[header] = normalize_text(ws.cell(row, col).value) if col else None
+    filled_meals = sum(1 for v in meal_values.values() if v is not None)
+
+    # Support both historical and current column names.
+    summary_text = None
+    for header in SUMMARY_HEADERS:
+        col = header_map.get(header)
+        if not col:
+            continue
+        text = normalize_text(ws.cell(row, col).value)
+        if text:
+            summary_text = text
+            break
+
+    parsed = parse_nutrition_from_summary(summary_text)
+    col_to_header = {col: header for header, col in header_map.items()}
+
+    calorie_col = first_existing_col(header_map, CALORIE_HEADERS)
+    protein_col = first_existing_col(header_map, PROTEIN_HEADERS)
+    carb_col = first_existing_col(header_map, CARB_HEADERS)
+    fat_col = first_existing_col(header_map, FAT_HEADERS)
+
+    if maybe_write_cell(ws, row, calorie_col, int(round(parsed["calories"])) if parsed.get("calories") else None):
+        written[col_to_header[calorie_col]] = int(round(parsed["calories"]))
+    if maybe_write_cell(ws, row, protein_col, int(round(parsed["protein"])) if parsed.get("protein") else None):
+        written[col_to_header[protein_col]] = int(round(parsed["protein"]))
+    if maybe_write_cell(ws, row, carb_col, int(round(parsed["carb"])) if parsed.get("carb") else None):
+        written[col_to_header[carb_col]] = int(round(parsed["carb"]))
+    if maybe_write_cell(ws, row, fat_col, int(round(parsed["fat"])) if parsed.get("fat") else None):
+        written[col_to_header[fat_col]] = int(round(parsed["fat"]))
+
+    calories_value = read_number(ws.cell(row, calorie_col).value) if calorie_col else None
+    protein_value = read_number(ws.cell(row, protein_col).value) if protein_col else None
+    carb_value = read_number(ws.cell(row, carb_col).value) if carb_col else None
+    fat_value = read_number(ws.cell(row, fat_col).value) if fat_col else None
+    summary_target_col = first_existing_col(header_map, SUMMARY_HEADERS)
+    if summary_target_col:
+        existing_summary = normalize_text(ws.cell(row, summary_target_col).value)
+        if not existing_summary:
+            generated = summary_text or build_nutrition_summary_text(
+                calories=calories_value,
+                protein=protein_value,
+                carb=carb_value,
+                fat=fat_value,
+            )
+            if generated:
+                ws.cell(row, summary_target_col).value = generated
+                written[col_to_header[summary_target_col]] = generated
+
+    status = {
+        "filled_meals": filled_meals,
+        "meal_values": meal_values,
+        "summary_present": bool(normalize_text(ws.cell(row, summary_target_col).value)) if summary_target_col else False,
+    }
+    return written, status
 
 
 def find_or_create_date_row(ws, header_row: int, header_map: Dict[str, int], date_str: str) -> int:
@@ -528,11 +692,17 @@ def main() -> int:
     header_map = get_header_map(ws, header_row)
     target_row = find_or_create_date_row(ws, header_row, header_map, target_date)
     written = apply_updates(ws, target_row, header_map, updates, clear_missing=args.clear_missing)
+    nutrition_written, diet_status = sync_nutrition_from_row(ws, target_row, header_map)
+    written.update(nutrition_written)
 
     if args.dry_run:
         print(f"[DRY-RUN] xlsx={xlsx_path}")
         print(f"[DRY-RUN] date={target_date}, row={target_row}")
         print(json.dumps(written, ensure_ascii=False, indent=2))
+        print(
+            f"[DRY-RUN] diet_status: filled_meals={diet_status['filled_meals']}/4, "
+            f"summary_present={diet_status['summary_present']}"
+        )
         return 0
 
     wb.save(xlsx_path)
@@ -544,6 +714,8 @@ def main() -> int:
             print(f"  - {key}: {value}")
     else:
         print("  - 无可写入字段（可能缓存数据为空）")
+    print(f"🍽 饮食列: {diet_status['filled_meals']}/4")
+    print(f"🧠 营养分析列已填写: {'是' if diet_status['summary_present'] else '否'}")
     return 0
 
 

@@ -24,6 +24,7 @@ description: "Garmin Connect integration for OpenClaw. Sync Garmin data to works
 - 推断来源：`exerciseSets.category` 分类码优先 + 训练内容关键词 + 四肌群循环兜底
 - 当日训练摘要：自动汇总为 `训练动作`（可选写入 `备注`）
 - 推断理由：自动写入 `备注`（包含命中分类码、UNKNOWN数量、兜底原因）
+- 营养列补全：若当日 `饮食总结/热量和营养成分分析` 已有文本，可自动回填 `总热量(大卡)、蛋白质摄入(g)、碳水摄入(g)、脂肪摄入(g)`
 
 ### C) 仍需手动填写
 
@@ -127,6 +128,28 @@ python3 scripts/garmin_backfill_to_xlsx.py --start-date 2026-02-14 --end-date 20
 - `训练部位`
 - `是否训练`（有训练动作时写入“是”）
 - 可选：`备注`（使用 `--write-summary-to-remark` 时写入训练摘要）
+- 营养补全（可自动）：`总热量(大卡) / 蛋白质摄入(g) / 碳水摄入(g) / 脂肪摄入(g)`
+
+列名兼容（必须按别名识别，不得硬编码单一列名）：
+- 营养分析列：`热量和营养成分分析` 或 `饮食总结`
+- 总热量列：`总热量(大卡)` 或 `总热量摄入(大卡)`
+
+## 饮食总结格式规范（强制）
+
+当 agent 回写 `饮食总结/热量和营养成分分析` 时，必须使用以下 4 行固定格式（顺序不可变）：
+
+```text
+总热量：约 2290–2580 kcal（中位约 2420 kcal）
+蛋白质：约 156–180 g（中位约 166 g）
+碳水：约 272–322 g（中位约 294 g）
+脂肪：约 57–79 g（中位约 67 g）
+```
+
+执行要求：
+- 每一行都必须包含：`约 <下限>-<上限> 单位（中位约 <数值> 单位）`
+- 单位固定：总热量用 `kcal`，三大营养素用 `g`
+- 使用 4 行换行文本，不要合并为一行，不要改字段名
+- 若某项无法估算，保留该字段并写：`约 0–0 <单位>（中位约 0 <单位>）`
 
 训练摘要格式示例：
 - `有氧运动40分/397kcal；力量训练88分/462kcal（共2项 128分 859kcal）`
@@ -219,6 +242,12 @@ python3 scripts/garmin_to_xlsx.py --date 2026-03-17
 python3 scripts/garmin_backfill_to_xlsx.py --start-date 2026-03-10 --end-date 2026-03-17
 ```
 
+### 4) 饮食列误判为空（重点）
+
+- `garmin_to_xlsx.py` 会输出：`diet_status: filled_meals=x/4, summary_present=<bool>`
+- 只有在 `早餐/午餐/晚餐/加餐` 四列都为空时，才能回复“饮食列为空”
+- 不能把 `饮食总结` 当成不存在；若表里没有 `热量和营养成分分析`，应自动使用 `饮食总结`
+
 ## 对 agent 的执行约束
 
 1. 用户要“同步 Garmin 到记录表”时，优先执行：`python3 scripts/sync_recent_days_to_xlsx.py`（至少覆盖昨天+今天）
@@ -230,3 +259,4 @@ python3 scripts/garmin_backfill_to_xlsx.py --start-date 2026-03-10 --end-date 20
 7. 用户提到“推断当日训练肌群”时，必须按“四肌群循环规则”输出并写入 `训练部位`
 8. 用户问“今天练哪个肌群”时，先执行：`python3 scripts/garmin_to_xlsx.py --query-muscle-group --date <当天>`，再回复结果
 9. 若返回含 `UNKNOWN` 分类码，必须结合 `inference_reason` 解释为何仍可推断（或为何触发循环兜底）
+10. 用户要求“同步并做热量/营养分析”时，执行后必须基于脚本输出返回 `filled_meals` 和 `summary_present`，禁止臆测“饮食为空”

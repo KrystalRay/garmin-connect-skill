@@ -25,6 +25,13 @@ It is optimized for OpenClaw daily use, with a simple default:
   2) Workout name keywords second
   3) Fixed cycle fallback last
 - Inference reason can be written into `备注`
+- If `饮食总结/热量和营养成分分析` already contains text, script can parse and backfill
+  `总热量(大卡), 蛋白质摄入(g), 碳水摄入(g), 脂肪摄入(g)`
+- Recommended fixed summary format:
+  1) `总热量：约 x–y kcal（中位约 z kcal）`
+  2) `蛋白质：约 x–y g（中位约 z g）`
+  3) `碳水：约 x–y g（中位约 z g）`
+  4) `脂肪：约 x–y g（中位约 z g）`
 
 ### Still manual
 
@@ -125,6 +132,9 @@ python3 scripts/garmin_backfill_to_xlsx.py --start-date 2026-02-14 --end-date 20
 - This skill currently does **not** include system-level scheduled tasks by default.
 - If needed, schedule manually via `launchd` (macOS) or similar.
 - To avoid date mismatch issues, always pass `--date` when syncing a specific day.
+- Column aliases are supported:
+  - nutrition analysis: `热量和营养成分分析` or `饮食总结`
+  - total calories: `总热量(大卡)` or `总热量摄入(大卡)`
 
 ## Troubleshooting
 
@@ -158,6 +168,19 @@ python3 scripts/garmin_to_xlsx.py --query-muscle-group --date 2026-03-18
 ```
 
 - If `inference_method` is fallback, check workout naming or Garmin set-category availability.
+
+### Diet columns falsely reported as empty
+
+- Run:
+
+```bash
+python3 scripts/garmin_to_xlsx.py --date 2026-03-18 --dry-run
+```
+
+- Check output:
+  - `diet_status: filled_meals=x/4`
+  - `summary_present=True/False`
+- Only when `filled_meals=0/4` should the agent conclude diet fields are empty.
 
 ## Version
 
